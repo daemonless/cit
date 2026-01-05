@@ -1,0 +1,483 @@
+#!/bin/sh
+# cit - Container Integration Test
+# A simple tool to verify containers actually work
+#
+# Test modes (cumulative - each includes all below):
+#   screenshot  →  health + capture screenshot + visual verify
+#   health      →  port + health endpoint check
+#   port        →  shell + port is listening
+#   shell       →  container starts, can exec into it
+#
+# Auto-detection:
+#   1. Labels from image (io.daemonless.port, io.daemonless.healthcheck-url, etc.)
+#   2. Mode from baseline.png existence or config override
+#   3. Config.yml only needed for overrides
+
+set -u
+
+# Defaults
+MODE=""
+PORT=""
+HEALTH=""
+WAIT=30
+ANNOTATIONS=""
+KEEP=false
+VERBOSE=false
+IMAGE=""
+REPO=""
+JSON_OUTPUT=""
+BASELINE=""
+SAVE_SCREENSHOT=""
+
+# Result tracking
+RESULT_SHELL="skip"
+RESULT_PORT="skip"
+RESULT_HEALTH="skip"
+RESULT_SCREENSHOT="skip"
+RESULT_VERIFY="skip"
+
+log() {
+    if [ "$VERBOSE" = true ]; then
+        echo "$@"
+    fi
+}
+
+# Parse arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo)
+            REPO="$2"
+            shift 2
+            ;;
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
+        --port)
+            PORT="$2"
+            shift 2
+            ;;
+        --health)
+            HEALTH="$2"
+            shift 2
+            ;;
+        --wait)
+            WAIT="$2"
+            shift 2
+            ;;
+        --annotation)
+            ANNOTATIONS="$ANNOTATIONS --annotation $2"
+            shift 2
+            ;;
+        --keep)
+            KEEP=true
+            shift
+            ;;
+        --verbose|-v)
+            VERBOSE=true
+            shift
+            ;;
+        --json)
+            JSON_OUTPUT="$2"
+            shift 2
+            ;;
+        --screenshot)
+            SAVE_SCREENSHOT="$2"
+            shift 2
+            ;;
+        --help|-h)
+            echo "Usage: cit IMAGE [OPTIONS]"
+            echo ""
+            echo "Modes (cumulative):"
+            echo "  screenshot  health + capture + verify (default if baseline.png exists)"
+            echo "  health      port + health endpoint check"
+            echo "  port        shell + port listening"
+            echo "  shell       container starts, can exec"
+            echo ""
+            echo "Options:"
+            echo "  --repo DIR          Read from DIR/.daemonless/ (config.yml, baseline.png)"
+            echo "  --mode MODE         Override test mode"
+            echo "  --port PORT         Override port (default: from image label)"
+            echo "  --health PATH       Override health endpoint (default: from image label)"
+            echo "  --wait SECONDS      Startup wait time (default: 30)"
+            echo "  --annotation K=V    Add container annotation (can be repeated)"
+            echo "  --keep              Don't cleanup after test"
+            echo "  --json FILE         Write result JSON to file"
+            echo "  --screenshot FILE   Save screenshot to file (screenshot mode only)"
+            echo "  --verbose, -v       Show more output"
+            echo ""
+            echo "Examples:"
+            echo "  cit ghcr.io/daemonless/radarr:latest --repo ."
+            echo "  cit nginx:latest --mode health --port 80"
+            exit 0
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            IMAGE="$1"
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$IMAGE" ]; then
+    echo "Error: No image specified" >&2
+    echo "Usage: cit IMAGE [OPTIONS]" >&2
+    exit 1
+fi
+
+# Detect container runtime
+if [ "$(uname)" = "FreeBSD" ]; then
+    if [ "$(id -u)" -ne 0 ]; then
+        RUNTIME="doas podman"
+    else
+        RUNTIME="podman"
+    fi
+    FETCH_CMD="fetch -qo /dev/null -T 5"
+elif command -v podman >/dev/null 2>&1; then
+    RUNTIME="podman"
+    FETCH_CMD="curl -sf -o /dev/null --max-time 5"
+elif command -v docker >/dev/null 2>&1; then
+    RUNTIME="docker"
+    FETCH_CMD="curl -sf -o /dev/null --max-time 5"
+else
+    echo "Error: No container runtime found (podman or docker)" >&2
+    exit 1
+fi
+
+log "Runtime: $RUNTIME"
+log "Image: $IMAGE"
+
+# Pull/check image first (needed to read labels)
+if $RUNTIME image exists "$IMAGE" 2>/dev/null; then
+    log "Image exists locally"
+else
+    case "$IMAGE" in
+        localhost/*|localhost:*)
+            log "Local image, skipping pull"
+            ;;
+        *)
+            log "Pulling image..."
+            if ! $RUNTIME pull "$IMAGE" >/dev/null 2>&1; then
+                echo "FAIL: Could not pull $IMAGE" >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
+
+# Read labels from image
+LABEL_PORT=$($RUNTIME inspect --format '{{index .Config.Labels "io.daemonless.port"}}' "$IMAGE" 2>/dev/null || echo "")
+LABEL_HEALTH=$($RUNTIME inspect --format '{{index .Config.Labels "io.daemonless.healthcheck-url"}}' "$IMAGE" 2>/dev/null || echo "")
+LABEL_MLOCK=$($RUNTIME inspect --format '{{index .Config.Labels "org.freebsd.jail.allow.mlock"}}' "$IMAGE" 2>/dev/null || echo "")
+
+log "Labels: port=$LABEL_PORT health=$LABEL_HEALTH mlock=$LABEL_MLOCK"
+
+# Apply label defaults (if not set via CLI)
+if [ -z "$PORT" ] && [ -n "$LABEL_PORT" ] && [ "$LABEL_PORT" != "<no value>" ]; then
+    PORT="$LABEL_PORT"
+    log "Using port from label: $PORT"
+fi
+
+if [ -z "$HEALTH" ] && [ -n "$LABEL_HEALTH" ] && [ "$LABEL_HEALTH" != "<no value>" ]; then
+    # Extract path from URL if full URL given
+    HEALTH=$(echo "$LABEL_HEALTH" | sed 's|^http://[^/]*||')
+    [ -z "$HEALTH" ] && HEALTH="/"
+    log "Using health from label: $HEALTH"
+fi
+
+if [ -z "$ANNOTATIONS" ] && [ "$LABEL_MLOCK" = "required" ]; then
+    ANNOTATIONS="--annotation org.freebsd.jail.allow.mlock=true"
+    log "Using mlock annotation from label"
+fi
+
+# Load config overrides from repo if specified
+if [ -n "$REPO" ]; then
+    # Check for baseline (try both locations)
+    if [ -f "$REPO/.daemonless/baseline.png" ]; then
+        BASELINE="$REPO/.daemonless/baseline.png"
+        log "Found baseline: $BASELINE"
+    elif [ -f "$REPO/.daemonless/baselines/baseline.png" ]; then
+        BASELINE="$REPO/.daemonless/baselines/baseline.png"
+        log "Found baseline: $BASELINE"
+    fi
+
+    # Check for config overrides
+    CIT_CONFIG=""
+    if [ -f "$REPO/.daemonless/config.yml" ]; then
+        CIT_CONFIG="$REPO/.daemonless/config.yml"
+    elif [ -f "$REPO/.daemonless.yml" ]; then
+        CIT_CONFIG="$REPO/.daemonless.yml"
+    fi
+
+    if [ -n "$CIT_CONFIG" ]; then
+        log "Loading overrides from $CIT_CONFIG"
+
+        # Mode override
+        if [ -z "$MODE" ]; then
+            _MODE=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*mode:' | awk '{print $2}')
+            [ -n "$_MODE" ] && MODE="$_MODE"
+        fi
+
+        # Port override
+        if [ -z "$PORT" ]; then
+            _PORT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*port:' | awk '{print $2}')
+            [ -n "$_PORT" ] && PORT="$_PORT"
+        fi
+
+        # Health override
+        if [ -z "$HEALTH" ]; then
+            _HEALTH=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*health:' | awk '{print $2}')
+            [ -n "$_HEALTH" ] && HEALTH="$_HEALTH"
+        fi
+
+        # Wait override
+        _WAIT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*wait:' | awk '{print $2}')
+        [ -n "$_WAIT" ] && WAIT="$_WAIT"
+
+        # Annotation overrides
+        if [ -z "$ANNOTATIONS" ]; then
+            while IFS= read -r line; do
+                ann=$(echo "$line" | sed 's/^[[:space:]]*-[[:space:]]*//')
+                [ -n "$ann" ] && ANNOTATIONS="$ANNOTATIONS --annotation $ann"
+            done <<EOF
+$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | sed -n '/annotations:/,/^[[:space:]]*[^-]/p' | grep '^[[:space:]]*-' 2>/dev/null)
+EOF
+        fi
+    fi
+fi
+
+# Auto-detect mode if not set
+if [ -z "$MODE" ]; then
+    if [ -n "$BASELINE" ]; then
+        MODE="screenshot"
+        log "Auto-detected mode: screenshot (baseline exists)"
+    elif [ -n "$HEALTH" ]; then
+        MODE="health"
+        log "Auto-detected mode: health (health endpoint defined)"
+    elif [ -n "$PORT" ]; then
+        MODE="port"
+        log "Auto-detected mode: port (port defined)"
+    else
+        MODE="shell"
+        log "Auto-detected mode: shell (fallback)"
+    fi
+fi
+
+# Set defaults for port/health if mode needs them
+if [ "$MODE" = "port" ] || [ "$MODE" = "health" ] || [ "$MODE" = "screenshot" ]; then
+    if [ -z "$PORT" ]; then
+        # Try EXPOSE from image
+        PORT=$($RUNTIME inspect --format '{{range $p, $conf := .Config.ExposedPorts}}{{$p}} {{end}}' "$IMAGE" 2>/dev/null | awk -F/ '{print $1; exit}')
+        if [ -z "$PORT" ] || [ "$PORT" = "<no value>" ]; then
+            PORT="8080"
+        fi
+        log "Using port: $PORT"
+    fi
+fi
+
+if [ "$MODE" = "health" ] || [ "$MODE" = "screenshot" ]; then
+    if [ -z "$HEALTH" ]; then
+        HEALTH="/"
+        log "Using default health: $HEALTH"
+    fi
+fi
+
+echo "Testing: $IMAGE"
+echo "  Mode: $MODE"
+[ -n "$PORT" ] && echo "  Port: $PORT"
+[ -n "$HEALTH" ] && echo "  Health: $HEALTH"
+
+# Generate unique container name
+CONTAINER_NAME="cit-$(date +%s)-$$"
+NETWORK_NAME="podman"
+
+# Cleanup function
+cleanup() {
+    if [ "$KEEP" = false ]; then
+        log "Cleaning up..."
+        $RUNTIME stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        $RUNTIME rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    else
+        echo "Container kept: $CONTAINER_NAME"
+    fi
+}
+
+trap cleanup EXIT
+
+# Build run command
+RUN_OPTS="-d --name $CONTAINER_NAME --network $NETWORK_NAME $ANNOTATIONS"
+
+# Run container
+log "Starting container..."
+if ! CID=$($RUNTIME run $RUN_OPTS "$IMAGE" 2>&1); then
+    echo "FAIL: Could not start container" >&2
+    echo "$CID" >&2
+    exit 1
+fi
+
+log "Container ID: $CID"
+
+# === SHELL TEST ===
+# Verify container is running and we can exec
+sleep 2
+if ! $RUNTIME ps -q --filter "name=$CONTAINER_NAME" 2>/dev/null | grep -q .; then
+    echo "FAIL: Container exited immediately"
+    echo "Logs:"
+    $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -20
+    exit 1
+fi
+
+if ! $RUNTIME exec "$CONTAINER_NAME" /bin/sh -c "echo ok" >/dev/null 2>&1; then
+    echo "FAIL: Cannot exec into container"
+    exit 1
+fi
+
+RESULT_SHELL="pass"
+log "Shell test: PASS"
+
+[ "$MODE" = "shell" ] && { echo "PASS: $IMAGE (shell)"; exit 0; }
+
+# === PORT TEST ===
+# Wait for ready signal, then check port
+READY_PATTERNS="Warmup complete|services.d.*done|Application started|listening on"
+log "Waiting for ready signal (timeout: ${WAIT}s)..."
+
+ELAPSED=0
+while [ "$ELAPSED" -lt "$WAIT" ]; do
+    if ! $RUNTIME ps -q --filter "name=$CONTAINER_NAME" 2>/dev/null | grep -q .; then
+        echo "FAIL: Container exited"
+        $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -20
+        exit 1
+    fi
+
+    if $RUNTIME logs "$CONTAINER_NAME" 2>&1 | grep -qE "$READY_PATTERNS"; then
+        log "Ready signal after ${ELAPSED}s"
+        sleep 2
+        break
+    fi
+
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+
+# Get container IP
+IP=$($RUNTIME inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CONTAINER_NAME" 2>/dev/null)
+
+if [ -z "$IP" ]; then
+    echo "FAIL: Could not get container IP" >&2
+    exit 1
+fi
+
+log "Container IP: $IP"
+
+# Check port is listening (using nc or direct fetch)
+if command -v nc >/dev/null 2>&1; then
+    if ! nc -z "$IP" "$PORT" 2>/dev/null; then
+        echo "FAIL: Port $PORT not listening"
+        exit 1
+    fi
+fi
+
+RESULT_PORT="pass"
+log "Port test: PASS"
+
+[ "$MODE" = "port" ] && { echo "PASS: $IMAGE (port)"; exit 0; }
+
+# === HEALTH TEST ===
+URL="http://${IP}:${PORT}${HEALTH}"
+log "Health check: $URL"
+
+if ! $FETCH_CMD "$URL" 2>/dev/null; then
+    echo "FAIL: Health check failed"
+    echo "  URL: $URL"
+    $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -10 | sed 's/^/  /'
+    exit 1
+fi
+
+RESULT_HEALTH="pass"
+log "Health test: PASS"
+
+[ "$MODE" = "health" ] && { echo "PASS: $IMAGE (health)"; exit 0; }
+
+# === SCREENSHOT TEST ===
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCREENSHOT_SCRIPT="$SCRIPT_DIR/screenshot.py"
+VERIFY_SCRIPT="$SCRIPT_DIR/verify.py"
+SCREENSHOT_FILE="/tmp/cit-screenshot-$$.png"
+
+WEB_URL="http://${IP}:${PORT}/"
+log "Screenshot: $WEB_URL"
+
+if [ ! -f "$SCREENSHOT_SCRIPT" ]; then
+    echo "FAIL: screenshot.py not found"
+    exit 1
+fi
+
+if ! python3 "$SCREENSHOT_SCRIPT" "$WEB_URL" "$SCREENSHOT_FILE"; then
+    echo "FAIL: Screenshot capture failed"
+    exit 1
+fi
+
+RESULT_SCREENSHOT="pass"
+log "Screenshot captured: $SCREENSHOT_FILE"
+
+# Verify screenshot
+if [ ! -f "$VERIFY_SCRIPT" ]; then
+    echo "FAIL: verify.py not found"
+    exit 1
+fi
+
+# Basic verification (not blank, has content)
+VERIFY_OUTPUT=$(python3 "$VERIFY_SCRIPT" "$SCREENSHOT_FILE" 2>&1)
+if ! echo "$VERIFY_OUTPUT" | grep -q "^PASS"; then
+    echo "FAIL: Screenshot verification failed"
+    echo "$VERIFY_OUTPUT"
+    exit 1
+fi
+
+# Baseline comparison if available
+if [ -n "$BASELINE" ] && [ -f "$BASELINE" ]; then
+    log "Comparing to baseline: $BASELINE"
+    COMPARE_OUTPUT=$(python3 "$VERIFY_SCRIPT" "$SCREENSHOT_FILE" --baseline "$BASELINE" 2>&1)
+    if ! echo "$COMPARE_OUTPUT" | grep -q "^PASS"; then
+        echo "FAIL: Baseline comparison failed"
+        echo "$COMPARE_OUTPUT"
+        # Save the screenshot for review
+        cp "$SCREENSHOT_FILE" "/tmp/cit-failed-$(basename "$IMAGE" | tr ':' '-').png"
+        exit 1
+    fi
+fi
+
+RESULT_VERIFY="pass"
+echo "PASS: $IMAGE (screenshot)"
+
+# Save or cleanup screenshot
+if [ -n "$SAVE_SCREENSHOT" ]; then
+    cp "$SCREENSHOT_FILE" "$SAVE_SCREENSHOT"
+    log "Saved screenshot to $SAVE_SCREENSHOT"
+fi
+rm -f "$SCREENSHOT_FILE"
+
+# Write JSON result
+if [ -n "$JSON_OUTPUT" ]; then
+    TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    cat > "$JSON_OUTPUT" <<JSONEOF
+{
+  "image": "$IMAGE",
+  "mode": "$MODE",
+  "timestamp": "$TIMESTAMP",
+  "shell": "$RESULT_SHELL",
+  "port": "$RESULT_PORT",
+  "health": "$RESULT_HEALTH",
+  "screenshot": "$RESULT_SCREENSHOT",
+  "verify": "$RESULT_VERIFY",
+  "result": "pass"
+}
+JSONEOF
+    log "Wrote result to $JSON_OUTPUT"
+fi
+
+exit 0

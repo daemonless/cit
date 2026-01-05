@@ -1,0 +1,26 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release tarball
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          mkdir -p cit-${VERSION}
+          cp cit screenshot.py verify.py cit-${VERSION}/
+          chmod +x cit-${VERSION}/cit
+          tar czf cit-${VERSION}.tar.gz cit-${VERSION}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: cit-*.tar.gz
+          generate_release_notes: true
