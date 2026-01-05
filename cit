@@ -15,6 +15,26 @@
 
 set -u
 
+# Dependencies for screenshot mode
+CIT_DEPS="python3 py311-selenium py311-scikit-image chromium"
+
+# Setup function - install dependencies
+setup_deps() {
+    echo "Installing cit dependencies..."
+    if [ "$(uname)" = "FreeBSD" ]; then
+        if [ "$(id -u)" -ne 0 ]; then
+            doas pkg install -y $CIT_DEPS
+        else
+            pkg install -y $CIT_DEPS
+        fi
+    else
+        echo "Error: --setup only supported on FreeBSD" >&2
+        exit 1
+    fi
+    echo "Setup complete"
+    exit 0
+}
+
 # Defaults
 MODE=""
 PORT=""
@@ -85,6 +105,9 @@ while [ $# -gt 0 ]; do
             SAVE_SCREENSHOT="$2"
             shift 2
             ;;
+        --setup)
+            setup_deps
+            ;;
         --help|-h)
             echo "Usage: cit IMAGE [OPTIONS]"
             echo ""
@@ -105,6 +128,7 @@ while [ $# -gt 0 ]; do
             echo "  --json FILE         Write result JSON to file"
             echo "  --screenshot FILE   Save screenshot to file (screenshot mode only)"
             echo "  --verbose, -v       Show more output"
+            echo "  --setup             Install dependencies (FreeBSD only)"
             echo ""
             echo "Examples:"
             echo "  cit ghcr.io/daemonless/radarr:latest --repo ."
