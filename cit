@@ -195,9 +195,8 @@ fi
 # Read labels from image
 LABEL_PORT=$($RUNTIME inspect --format '{{index .Config.Labels "io.daemonless.port"}}' "$IMAGE" 2>/dev/null || echo "")
 LABEL_HEALTH=$($RUNTIME inspect --format '{{index .Config.Labels "io.daemonless.healthcheck-url"}}' "$IMAGE" 2>/dev/null || echo "")
-LABEL_MLOCK=$($RUNTIME inspect --format '{{index .Config.Labels "org.freebsd.jail.allow.mlock"}}' "$IMAGE" 2>/dev/null || echo "")
 
-log "Labels: port=$LABEL_PORT health=$LABEL_HEALTH mlock=$LABEL_MLOCK"
+log "Labels: port=$LABEL_PORT health=$LABEL_HEALTH"
 
 # Apply label defaults (if not set via CLI)
 if [ -z "$PORT" ] && [ -n "$LABEL_PORT" ] && [ "$LABEL_PORT" != "<no value>" ]; then
@@ -212,9 +211,13 @@ if [ -z "$HEALTH" ] && [ -n "$LABEL_HEALTH" ] && [ "$LABEL_HEALTH" != "<no value
     log "Using health from label: $HEALTH"
 fi
 
-if [ -z "$ANNOTATIONS" ] && [ "$LABEL_MLOCK" = "required" ]; then
-    ANNOTATIONS="--annotation org.freebsd.jail.allow.mlock=true"
-    log "Using mlock annotation from label"
+# Get all org.freebsd.jail.* labels and convert to annotations
+JAIL_ANNOTATIONS=$($RUNTIME inspect --format '{{json .Config.Labels}}' "$IMAGE" 2>/dev/null | \
+    jq -r 'to_entries[] | select(.key | startswith("org.freebsd.jail.")) | select(.value == "required" or .value == "true") | "--annotation \(.key)=true"' 2>/dev/null || echo "")
+
+if [ -n "$JAIL_ANNOTATIONS" ]; then
+    ANNOTATIONS="$ANNOTATIONS $JAIL_ANNOTATIONS"
+    log "Using jail annotations from labels: $JAIL_ANNOTATIONS"
 fi
 
 # Load config overrides from repo if specified
