@@ -50,6 +50,7 @@ BASELINE=""
 SAVE_SCREENSHOT=""
 COMPOSE=false
 COMPOSE_FILE=""
+READY_PATTERN_OVERRIDE=""
 
 # Result tracking
 RESULT_SHELL="skip"
@@ -326,6 +327,10 @@ if [ -n "$REPO" ]; then
         _WAIT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*wait:' | awk '{print $2}')
         [ -n "$_WAIT" ] && WAIT="$_WAIT"
 
+        # Ready pattern override (strip quotes from YAML value)
+        _READY=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*ready:' | sed 's/^[[:space:]]*ready:[[:space:]]*//' | sed 's/^["'"'"']\(.*\)["'"'"']$/\1/')
+        [ -n "$_READY" ] && READY_PATTERN_OVERRIDE="$_READY"
+
         # Annotation overrides
         if [ -z "$ANNOTATIONS" ]; then
             while IFS= read -r line; do
@@ -452,7 +457,13 @@ log "Target IP: $IP"
 
 # Wait for ready signal (single container only)
 if [ "$COMPOSE" = false ]; then
-    READY_PATTERNS="Warmup complete|services.d.*done|Application started|listening on"
+    # Use override pattern if set, otherwise use defaults
+    if [ -n "$READY_PATTERN_OVERRIDE" ]; then
+        READY_PATTERNS="$READY_PATTERN_OVERRIDE"
+        log "Using ready pattern override: $READY_PATTERNS"
+    else
+        READY_PATTERNS="Warmup complete|services.d.*done|Application started|Startup complete|listening on"
+    fi
     log "Waiting for ready signal (timeout: ${WAIT}s)..."
 
     ELAPSED=0
