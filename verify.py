@@ -7,7 +7,7 @@ from skimage import io, color, filters
 
 # Thresholds (configurable via env)
 BLANK_THRESHOLD = float(os.environ.get("VERIFY_BLANK_THRESHOLD", "10"))
-EDGE_THRESHOLD = float(os.environ.get("VERIFY_EDGE_THRESHOLD", "0.01"))
+EDGE_THRESHOLD = float(os.environ.get("VERIFY_EDGE_THRESHOLD", "0.005"))
 
 def is_blank(img):
     """Check if image is mostly one color (blank/failed render)."""

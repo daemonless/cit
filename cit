@@ -48,6 +48,8 @@ REPO=""
 JSON_OUTPUT=""
 BASELINE=""
 SAVE_SCREENSHOT=""
+COMPOSE=false
+COMPOSE_FILE=""
 
 # Result tracking
 RESULT_SHELL="skip"
@@ -59,6 +61,40 @@ RESULT_VERIFY="skip"
 log() {
     if [ "$VERBOSE" = true ]; then
         echo "$@"
+    fi
+}
+
+# Compose helper functions
+start_target() {
+    if [ "$COMPOSE" = true ]; then
+        if [ "$(uname)" = "FreeBSD" ] && [ "$(id -u)" -ne 0 ]; then
+            doas podman-compose -f "$COMPOSE_FILE" up -d 2>&1
+        else
+            podman-compose -f "$COMPOSE_FILE" up -d 2>&1
+        fi
+    else
+        $RUNTIME run $RUN_OPTS "$IMAGE" 2>&1
+    fi
+}
+
+stop_target() {
+    if [ "$COMPOSE" = true ]; then
+        if [ "$(uname)" = "FreeBSD" ] && [ "$(id -u)" -ne 0 ]; then
+            doas podman-compose -f "$COMPOSE_FILE" down >/dev/null 2>&1 || true
+        else
+            podman-compose -f "$COMPOSE_FILE" down >/dev/null 2>&1 || true
+        fi
+    else
+        $RUNTIME stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        $RUNTIME rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+}
+
+get_target_ip() {
+    if [ "$COMPOSE" = true ]; then
+        echo "127.0.0.1"
+    else
+        $RUNTIME inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CONTAINER_NAME" 2>/dev/null
     fi
 }
 
@@ -146,11 +182,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ -z "$IMAGE" ]; then
-    echo "Error: No image specified" >&2
-    echo "Usage: cit IMAGE [OPTIONS]" >&2
-    exit 1
-fi
+# IMAGE check deferred until after config loading (compose mode sets IMAGE)
 
 # Detect container runtime
 if [ "$(uname)" = "FreeBSD" ]; then
@@ -172,29 +204,63 @@ else
 fi
 
 log "Runtime: $RUNTIME"
-log "Image: $IMAGE"
 
-# Pull/check image first (needed to read labels)
-if $RUNTIME image exists "$IMAGE" 2>/dev/null; then
-    log "Image exists locally"
-else
-    case "$IMAGE" in
-        localhost/*|localhost:*)
-            log "Local image, skipping pull"
-            ;;
-        *)
-            log "Pulling image..."
-            if ! $RUNTIME pull "$IMAGE" >/dev/null 2>&1; then
-                echo "FAIL: Could not pull $IMAGE" >&2
+# Check for compose mode FIRST (before image operations)
+if [ -n "$REPO" ]; then
+    CIT_CONFIG=""
+    if [ -f "$REPO/.daemonless/config.yml" ]; then
+        CIT_CONFIG="$REPO/.daemonless/config.yml"
+    elif [ -f "$REPO/.daemonless.yml" ]; then
+        CIT_CONFIG="$REPO/.daemonless.yml"
+    fi
+    if [ -n "$CIT_CONFIG" ]; then
+        _COMPOSE=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*compose:' | awk '{print $2}')
+        if [ "$_COMPOSE" = "true" ]; then
+            COMPOSE=true
+            if [ -f "$REPO/.daemonless/compose.yml" ]; then
+                COMPOSE_FILE="$REPO/.daemonless/compose.yml"
+            elif [ -f "$REPO/.daemonless/compose.yaml" ]; then
+                COMPOSE_FILE="$REPO/.daemonless/compose.yaml"
+            else
+                echo "FAIL: compose: true but no compose.yml found" >&2
                 exit 1
             fi
-            ;;
-    esac
+            IMAGE="compose"
+            log "Compose mode: $COMPOSE_FILE"
+        fi
+    fi
 fi
 
-# Read labels from image
-LABEL_PORT=$($RUNTIME inspect --format '{{index .Config.Labels "io.daemonless.port"}}' "$IMAGE" 2>/dev/null || echo "")
-LABEL_HEALTH=$($RUNTIME inspect --format '{{index .Config.Labels "io.daemonless.healthcheck-url"}}' "$IMAGE" 2>/dev/null || echo "")
+log "Image: $IMAGE"
+
+# Pull/check image first (needed to read labels) - skip for compose
+if [ "$COMPOSE" = false ]; then
+    if $RUNTIME image exists "$IMAGE" 2>/dev/null; then
+        log "Image exists locally"
+    else
+        case "$IMAGE" in
+            localhost/*|localhost:*)
+                log "Local image, skipping pull"
+                ;;
+            *)
+                log "Pulling image..."
+                if ! $RUNTIME pull "$IMAGE" >/dev/null 2>&1; then
+                    echo "FAIL: Could not pull $IMAGE" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    fi
+fi
+
+# Read labels from image (skip for compose)
+if [ "$COMPOSE" = false ]; then
+    LABEL_PORT=$($RUNTIME inspect --format '{{index .Config.Labels "io.daemonless.port"}}' "$IMAGE" 2>/dev/null || echo "")
+    LABEL_HEALTH=$($RUNTIME inspect --format '{{index .Config.Labels "io.daemonless.healthcheck-url"}}' "$IMAGE" 2>/dev/null || echo "")
+else
+    LABEL_PORT=""
+    LABEL_HEALTH=""
+fi
 
 log "Labels: port=$LABEL_PORT health=$LABEL_HEALTH"
 
@@ -211,13 +277,15 @@ if [ -z "$HEALTH" ] && [ -n "$LABEL_HEALTH" ] && [ "$LABEL_HEALTH" != "<no value
     log "Using health from label: $HEALTH"
 fi
 
-# Get all org.freebsd.jail.* labels and convert to annotations
-JAIL_ANNOTATIONS=$($RUNTIME inspect --format '{{json .Config.Labels}}' "$IMAGE" 2>/dev/null | \
-    jq -r 'to_entries[] | select(.key | startswith("org.freebsd.jail.")) | select(.value == "required" or .value == "true") | "--annotation \(.key)=true"' 2>/dev/null || echo "")
+# Get all org.freebsd.jail.* labels and convert to annotations (skip for compose)
+if [ "$COMPOSE" = false ]; then
+    JAIL_ANNOTATIONS=$($RUNTIME inspect --format '{{json .Config.Labels}}' "$IMAGE" 2>/dev/null | \
+        jq -r 'to_entries[] | select(.key | startswith("org.freebsd.jail.")) | select(.value == "required" or .value == "true") | "--annotation \(.key)=true"' 2>/dev/null || echo "")
 
-if [ -n "$JAIL_ANNOTATIONS" ]; then
-    ANNOTATIONS="$ANNOTATIONS $JAIL_ANNOTATIONS"
-    log "Using jail annotations from labels: $JAIL_ANNOTATIONS"
+    if [ -n "$JAIL_ANNOTATIONS" ]; then
+        ANNOTATIONS="$ANNOTATIONS $JAIL_ANNOTATIONS"
+        log "Using jail annotations from labels: $JAIL_ANNOTATIONS"
+    fi
 fi
 
 # Load config overrides from repo if specified
@@ -242,23 +310,17 @@ if [ -n "$REPO" ]; then
     if [ -n "$CIT_CONFIG" ]; then
         log "Loading overrides from $CIT_CONFIG"
 
-        # Mode override
-        if [ -z "$MODE" ]; then
-            _MODE=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*mode:' | awk '{print $2}')
-            [ -n "$_MODE" ] && MODE="$_MODE"
-        fi
+        # Mode override (config overrides labels)
+        _MODE=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*mode:' | awk '{print $2}')
+        [ -n "$_MODE" ] && MODE="$_MODE"
 
-        # Port override
-        if [ -z "$PORT" ]; then
-            _PORT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*port:' | awk '{print $2}')
-            [ -n "$_PORT" ] && PORT="$_PORT"
-        fi
+        # Port override (config overrides labels)
+        _PORT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*port:' | awk '{print $2}')
+        [ -n "$_PORT" ] && PORT="$_PORT"
 
-        # Health override
-        if [ -z "$HEALTH" ]; then
-            _HEALTH=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*health:' | awk '{print $2}')
-            [ -n "$_HEALTH" ] && HEALTH="$_HEALTH"
-        fi
+        # Health override (config overrides labels)
+        _HEALTH=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*health:' | awk '{print $2}')
+        [ -n "$_HEALTH" ] && HEALTH="$_HEALTH"
 
         # Wait override
         _WAIT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*wait:' | awk '{print $2}')
@@ -293,15 +355,26 @@ if [ -z "$MODE" ]; then
     fi
 fi
 
+# Verify IMAGE is set (config loading may have set it for compose mode)
+if [ -z "$IMAGE" ]; then
+    echo "Error: No image specified" >&2
+    echo "Usage: cit IMAGE [OPTIONS]" >&2
+    echo "       cit --repo PATH (for compose mode)" >&2
+    exit 1
+fi
+
 # Set defaults for port/health if mode needs them
 if [ "$MODE" = "port" ] || [ "$MODE" = "health" ] || [ "$MODE" = "screenshot" ]; then
-    if [ -z "$PORT" ]; then
+    if [ -z "$PORT" ] && [ "$COMPOSE" = false ]; then
         # Try EXPOSE from image
         PORT=$($RUNTIME inspect --format '{{range $p, $conf := .Config.ExposedPorts}}{{$p}} {{end}}' "$IMAGE" 2>/dev/null | awk -F/ '{print $1; exit}')
         if [ -z "$PORT" ] || [ "$PORT" = "<no value>" ]; then
             PORT="8080"
         fi
         log "Using port: $PORT"
+    elif [ -z "$PORT" ]; then
+        PORT="8080"
+        log "Using default port: $PORT"
     fi
 fi
 
@@ -325,10 +398,9 @@ NETWORK_NAME="podman"
 cleanup() {
     if [ "$KEEP" = false ]; then
         log "Cleaning up..."
-        $RUNTIME stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        $RUNTIME rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        stop_target
     else
-        echo "Container kept: $CONTAINER_NAME"
+        echo "Target kept: $CONTAINER_NAME"
     fi
 }
 
@@ -337,75 +409,87 @@ trap cleanup EXIT
 # Build run command
 RUN_OPTS="-d --name $CONTAINER_NAME --network $NETWORK_NAME $ANNOTATIONS"
 
-# Run container
-log "Starting container..."
-if ! CID=$($RUNTIME run $RUN_OPTS "$IMAGE" 2>&1); then
-    echo "FAIL: Could not start container" >&2
+# Start target
+log "Starting target..."
+if ! CID=$(start_target); then
+    echo "FAIL: Could not start target" >&2
     echo "$CID" >&2
     exit 1
 fi
 
-log "Container ID: $CID"
+log "Started: $CID"
 
 # === SHELL TEST ===
-# Verify container is running and we can exec
-sleep 2
-if ! $RUNTIME ps -q --filter "name=$CONTAINER_NAME" 2>/dev/null | grep -q .; then
-    echo "FAIL: Container exited immediately"
-    echo "Logs:"
-    $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -20
-    exit 1
-fi
-
-if ! $RUNTIME exec "$CONTAINER_NAME" /bin/sh -c "echo ok" >/dev/null 2>&1; then
-    echo "FAIL: Cannot exec into container"
-    exit 1
-fi
-
-RESULT_SHELL="pass"
-log "Shell test: PASS"
-
-[ "$MODE" = "shell" ] && { echo "PASS: $IMAGE (shell)"; exit 0; }
-
-# === PORT TEST ===
-# Wait for ready signal, then check port
-READY_PATTERNS="Warmup complete|services.d.*done|Application started|listening on"
-log "Waiting for ready signal (timeout: ${WAIT}s)..."
-
-ELAPSED=0
-while [ "$ELAPSED" -lt "$WAIT" ]; do
+# Verify container is running and we can exec (skip for compose)
+if [ "$COMPOSE" = false ]; then
+    sleep 2
     if ! $RUNTIME ps -q --filter "name=$CONTAINER_NAME" 2>/dev/null | grep -q .; then
-        echo "FAIL: Container exited"
+        echo "FAIL: Container exited immediately"
+        echo "Logs:"
         $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -20
         exit 1
     fi
 
-    if $RUNTIME logs "$CONTAINER_NAME" 2>&1 | grep -qE "$READY_PATTERNS"; then
-        log "Ready signal after ${ELAPSED}s"
-        sleep 2
-        break
+    if ! $RUNTIME exec "$CONTAINER_NAME" /bin/sh -c "echo ok" >/dev/null 2>&1; then
+        echo "FAIL: Cannot exec into container"
+        exit 1
     fi
 
+    RESULT_SHELL="pass"
+    log "Shell test: PASS"
+
+    [ "$MODE" = "shell" ] && { echo "PASS: $IMAGE (shell)"; exit 0; }
+fi
+
+# === PORT TEST ===
+# Get target IP
+IP=$(get_target_ip)
+if [ -z "$IP" ]; then
+    echo "FAIL: Could not get target IP" >&2
+    exit 1
+fi
+log "Target IP: $IP"
+
+# Wait for ready signal (single container only)
+if [ "$COMPOSE" = false ]; then
+    READY_PATTERNS="Warmup complete|services.d.*done|Application started|listening on"
+    log "Waiting for ready signal (timeout: ${WAIT}s)..."
+
+    ELAPSED=0
+    while [ "$ELAPSED" -lt "$WAIT" ]; do
+        if ! $RUNTIME ps -q --filter "name=$CONTAINER_NAME" 2>/dev/null | grep -q .; then
+            echo "FAIL: Container exited"
+            $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -20
+            exit 1
+        fi
+
+        if $RUNTIME logs "$CONTAINER_NAME" 2>&1 | grep -qE "$READY_PATTERNS"; then
+            log "Ready signal after ${ELAPSED}s"
+            sleep 2
+            break
+        fi
+
+        sleep 1
+        ELAPSED=$((ELAPSED + 1))
+    done
+fi
+
+# Wait for port to be listening
+log "Waiting for port $PORT (timeout: ${WAIT}s)..."
+ELAPSED=0
+while [ "$ELAPSED" -lt "$WAIT" ]; do
+    if nc -z "$IP" "$PORT" 2>/dev/null; then
+        log "Port ready after ${ELAPSED}s"
+        break
+    fi
     sleep 1
     ELAPSED=$((ELAPSED + 1))
 done
 
-# Get container IP
-IP=$($RUNTIME inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CONTAINER_NAME" 2>/dev/null)
-
-if [ -z "$IP" ]; then
-    echo "FAIL: Could not get container IP" >&2
+# Final port check
+if ! nc -z "$IP" "$PORT" 2>/dev/null; then
+    echo "FAIL: Port $PORT not listening"
     exit 1
-fi
-
-log "Container IP: $IP"
-
-# Check port is listening (using nc or direct fetch)
-if command -v nc >/dev/null 2>&1; then
-    if ! nc -z "$IP" "$PORT" 2>/dev/null; then
-        echo "FAIL: Port $PORT not listening"
-        exit 1
-    fi
 fi
 
 RESULT_PORT="pass"
