@@ -567,8 +567,12 @@ if [ -n "$BASELINE" ] && [ -f "$BASELINE" ]; then
     if ! echo "$COMPARE_OUTPUT" | grep -q "^PASS"; then
         echo "FAIL: Baseline comparison failed"
         echo "$COMPARE_OUTPUT"
-        # Save the screenshot for review
+        # Save the screenshot for review (both locations)
         cp "$SCREENSHOT_FILE" "/tmp/cit-failed-$(basename "$IMAGE" | tr ':' '-').png"
+        if [ -n "$SAVE_SCREENSHOT" ]; then
+            cp "$SCREENSHOT_FILE" "$SAVE_SCREENSHOT"
+            log "Saved failed screenshot to $SAVE_SCREENSHOT"
+        fi
         exit 1
     fi
 fi
