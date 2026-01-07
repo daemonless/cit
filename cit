@@ -51,6 +51,7 @@ SAVE_SCREENSHOT=""
 COMPOSE=false
 COMPOSE_FILE=""
 READY_PATTERN_OVERRIDE=""
+SCREENSHOT_URL=""
 
 # Result tracking
 RESULT_SHELL="skip"
@@ -331,6 +332,10 @@ if [ -n "$REPO" ]; then
         _READY=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*ready:' | sed 's/^[[:space:]]*ready:[[:space:]]*//' | sed 's/^["'"'"']\(.*\)["'"'"']$/\1/')
         [ -n "$_READY" ] && READY_PATTERN_OVERRIDE="$_READY"
 
+        # Screenshot path override (e.g., screenshot: /web)
+        _SCREENSHOT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*screenshot:' | awk '{print $2}')
+        [ -n "$_SCREENSHOT" ] && SCREENSHOT_URL="$_SCREENSHOT"
+
         # Annotation overrides
         if [ -z "$ANNOTATIONS" ]; then
             while IFS= read -r line; do
@@ -530,7 +535,11 @@ SCREENSHOT_SCRIPT="$SCRIPT_DIR/screenshot.py"
 VERIFY_SCRIPT="$SCRIPT_DIR/verify.py"
 SCREENSHOT_FILE="/tmp/cit-screenshot-$$.png"
 
-WEB_URL="http://${IP}:${PORT}/"
+if [ -n "$SCREENSHOT_URL" ]; then
+    WEB_URL="http://${IP}:${PORT}${SCREENSHOT_URL}"
+else
+    WEB_URL="http://${IP}:${PORT}/"
+fi
 log "Screenshot: $WEB_URL"
 
 if [ ! -f "$SCREENSHOT_SCRIPT" ]; then
