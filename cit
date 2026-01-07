@@ -52,6 +52,7 @@ COMPOSE=false
 COMPOSE_FILE=""
 READY_PATTERN_OVERRIDE=""
 SCREENSHOT_URL=""
+HTTPS=false
 
 # Result tracking
 RESULT_SHELL="skip"
@@ -336,6 +337,10 @@ if [ -n "$REPO" ]; then
         _SCREENSHOT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*screenshot:' | awk '{print $2}')
         [ -n "$_SCREENSHOT" ] && SCREENSHOT_URL="$_SCREENSHOT"
 
+        # HTTPS override (e.g., https: true)
+        _HTTPS=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*https:' | awk '{print $2}')
+        [ "$_HTTPS" = "true" ] && HTTPS=true
+
         # Annotation overrides
         if [ -z "$ANNOTATIONS" ]; then
             while IFS= read -r line; do
@@ -514,10 +519,16 @@ log "Port test: PASS"
 [ "$MODE" = "port" ] && { echo "PASS: $IMAGE (port)"; exit 0; }
 
 # === HEALTH TEST ===
-URL="http://${IP}:${PORT}${HEALTH}"
+if [ "$HTTPS" = true ]; then
+    URL="https://${IP}:${PORT}${HEALTH}"
+    FETCH_CMD_HEALTH="fetch --no-verify-peer -qo /dev/null -T 5"
+else
+    URL="http://${IP}:${PORT}${HEALTH}"
+    FETCH_CMD_HEALTH="$FETCH_CMD"
+fi
 log "Health check: $URL"
 
-if ! $FETCH_CMD "$URL" 2>/dev/null; then
+if ! $FETCH_CMD_HEALTH "$URL" 2>/dev/null; then
     echo "FAIL: Health check failed"
     echo "  URL: $URL"
     $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -10 | sed 's/^/  /'
@@ -535,10 +546,15 @@ SCREENSHOT_SCRIPT="$SCRIPT_DIR/screenshot.py"
 VERIFY_SCRIPT="$SCRIPT_DIR/verify.py"
 SCREENSHOT_FILE="/tmp/cit-screenshot-$$.png"
 
-if [ -n "$SCREENSHOT_URL" ]; then
-    WEB_URL="http://${IP}:${PORT}${SCREENSHOT_URL}"
+if [ "$HTTPS" = true ]; then
+    PROTO="https"
 else
-    WEB_URL="http://${IP}:${PORT}/"
+    PROTO="http"
+fi
+if [ -n "$SCREENSHOT_URL" ]; then
+    WEB_URL="${PROTO}://${IP}:${PORT}${SCREENSHOT_URL}"
+else
+    WEB_URL="${PROTO}://${IP}:${PORT}/"
 fi
 log "Screenshot: $WEB_URL"
 
