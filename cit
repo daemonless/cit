@@ -11,7 +11,7 @@
 # Auto-detection:
 #   1. Labels from image (io.daemonless.port, io.daemonless.healthcheck-url, etc.)
 #   2. Mode from baseline.png existence or config override
-#   3. Config.yml only needed for overrides
+#   3. config.yaml only needed for overrides
 
 set -u
 
@@ -157,7 +157,7 @@ while [ $# -gt 0 ]; do
             echo "  shell       container starts, can exec"
             echo ""
             echo "Options:"
-            echo "  --repo DIR          Read from DIR/.daemonless/ (config.yml, baseline.png)"
+            echo "  --repo DIR          Read from DIR/.daemonless/ (config.yaml, baseline.png)"
             echo "  --mode MODE         Override test mode"
             echo "  --port PORT         Override port (default: from image label)"
             echo "  --health PATH       Override health endpoint (default: from image label)"
@@ -211,21 +211,21 @@ log "Runtime: $RUNTIME"
 # Check for compose mode FIRST (before image operations)
 if [ -n "$REPO" ]; then
     CIT_CONFIG=""
-    if [ -f "$REPO/.daemonless/config.yml" ]; then
-        CIT_CONFIG="$REPO/.daemonless/config.yml"
-    elif [ -f "$REPO/.daemonless.yml" ]; then
-        CIT_CONFIG="$REPO/.daemonless.yml"
+    if [ -f "$REPO/.daemonless/config.yaml" ]; then
+        CIT_CONFIG="$REPO/.daemonless/config.yaml"
+    elif [ -f "$REPO/.daemonless.yaml" ]; then
+        CIT_CONFIG="$REPO/.daemonless.yaml"
     fi
     if [ -n "$CIT_CONFIG" ]; then
         _COMPOSE=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*compose:' | awk '{print $2}')
         if [ "$_COMPOSE" = "true" ]; then
             COMPOSE=true
-            if [ -f "$REPO/.daemonless/compose.yml" ]; then
-                COMPOSE_FILE="$REPO/.daemonless/compose.yml"
-            elif [ -f "$REPO/.daemonless/compose.yaml" ]; then
+            if [ -f "$REPO/.daemonless/compose.yaml" ]; then
                 COMPOSE_FILE="$REPO/.daemonless/compose.yaml"
+            elif [ -f "$REPO/.daemonless/compose.yml" ]; then
+                COMPOSE_FILE="$REPO/.daemonless/compose.yml"
             else
-                echo "FAIL: compose: true but no compose.yml found" >&2
+                echo "FAIL: compose: true but no compose.yaml found" >&2
                 exit 1
             fi
             IMAGE="compose"
@@ -306,12 +306,12 @@ if [ -n "$REPO" ]; then
     CIT_CONFIG=""
     if [ -f "$REPO/.daemonless/config.yaml" ]; then
         CIT_CONFIG="$REPO/.daemonless/config.yaml"
-    elif [ -f "$REPO/.daemonless/config.yml" ]; then
-        CIT_CONFIG="$REPO/.daemonless/config.yml"
+    elif [ -f "$REPO/.daemonless/config.yaml" ]; then
+        CIT_CONFIG="$REPO/.daemonless/config.yaml"
     elif [ -f "$REPO/.daemonless.yaml" ]; then
         CIT_CONFIG="$REPO/.daemonless.yaml"
-    elif [ -f "$REPO/.daemonless.yml" ]; then
-        CIT_CONFIG="$REPO/.daemonless.yml"
+    elif [ -f "$REPO/.daemonless.yaml" ]; then
+        CIT_CONFIG="$REPO/.daemonless.yaml"
     fi
 
     if [ -n "$CIT_CONFIG" ]; then
