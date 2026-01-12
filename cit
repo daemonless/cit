@@ -304,8 +304,12 @@ if [ -n "$REPO" ]; then
 
     # Check for config overrides
     CIT_CONFIG=""
-    if [ -f "$REPO/.daemonless/config.yml" ]; then
+    if [ -f "$REPO/.daemonless/config.yaml" ]; then
+        CIT_CONFIG="$REPO/.daemonless/config.yaml"
+    elif [ -f "$REPO/.daemonless/config.yml" ]; then
         CIT_CONFIG="$REPO/.daemonless/config.yml"
+    elif [ -f "$REPO/.daemonless.yaml" ]; then
+        CIT_CONFIG="$REPO/.daemonless.yaml"
     elif [ -f "$REPO/.daemonless.yml" ]; then
         CIT_CONFIG="$REPO/.daemonless.yml"
     fi
