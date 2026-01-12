@@ -33,9 +33,28 @@ def screenshot(url, output, timeout=30):
         WebDriverWait(driver, timeout).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
-        # Brief pause for JS frameworks to render
+
+        # Smart Wait: Wait for UI to stabilize (stop animating/loading)
         import time
-        time.sleep(2)
+        stable = False
+        start_time = time.time()
+        last_screen = None
+        
+        # Check for stability for up to 10 seconds
+        print(f"Waiting for UI stability (max 10s)...", file=sys.stderr)
+        while time.time() - start_time < 10:
+            current_screen = driver.get_screenshot_as_base64()
+            if last_screen and current_screen == last_screen:
+                elapsed = time.time() - start_time
+                print(f"UI stabilized after {elapsed:.2f}s", file=sys.stderr)
+                stable = True
+                break
+            last_screen = current_screen
+            time.sleep(0.5)
+            
+        if not stable:
+            print("UI did not stabilize (timeout reached), taking final screenshot", file=sys.stderr)
+
         driver.save_screenshot(output)
         return True
     except Exception as e:
