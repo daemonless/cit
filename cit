@@ -47,6 +47,7 @@ IMAGE=""
 REPO=""
 JSON_OUTPUT=""
 BASELINE=""
+TAG=""
 SAVE_SCREENSHOT=""
 COMPOSE=false
 COMPOSE_FILE=""
@@ -144,6 +145,10 @@ while [ $# -gt 0 ]; do
             SAVE_SCREENSHOT="$2"
             shift 2
             ;;
+        --tag)
+            TAG="$2"
+            shift 2
+            ;;
         --setup)
             setup_deps
             ;;
@@ -166,6 +171,7 @@ while [ $# -gt 0 ]; do
             echo "  --keep              Don't cleanup after test"
             echo "  --json FILE         Write result JSON to file"
             echo "  --screenshot FILE   Save screenshot to file (screenshot mode only)"
+            echo "  --tag TAG           Image tag (for per-tag baselines: baseline-TAG.png)"
             echo "  --verbose, -v       Show more output"
             echo "  --setup             Install dependencies (FreeBSD only)"
             echo ""
@@ -293,8 +299,14 @@ fi
 
 # Load config overrides from repo if specified
 if [ -n "$REPO" ]; then
-    # Check for baseline (try both locations)
-    if [ -f "$REPO/.daemonless/baseline.png" ]; then
+    # Check for baseline (try tag-specific first, then default)
+    if [ -n "$TAG" ] && [ -f "$REPO/.daemonless/baseline-${TAG}.png" ]; then
+        BASELINE="$REPO/.daemonless/baseline-${TAG}.png"
+        log "Found tag-specific baseline: $BASELINE"
+    elif [ -n "$TAG" ] && [ -f "$REPO/.daemonless/baselines/baseline-${TAG}.png" ]; then
+        BASELINE="$REPO/.daemonless/baselines/baseline-${TAG}.png"
+        log "Found tag-specific baseline: $BASELINE"
+    elif [ -f "$REPO/.daemonless/baseline.png" ]; then
         BASELINE="$REPO/.daemonless/baseline.png"
         log "Found baseline: $BASELINE"
     elif [ -f "$REPO/.daemonless/baselines/baseline.png" ]; then

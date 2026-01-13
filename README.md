@@ -58,6 +58,7 @@ git clone https://github.com/daemonless/cit.git
 | `--annotation K=V` | Add container annotation (repeatable) |
 | `--keep` | Don't cleanup container after test |
 | `--screenshot FILE` | Capture screenshot |
+| `--tag TAG` | Image tag for per-tag baselines (e.g., `pkg`, `latest`) |
 | `--verify` | Verify screenshot with scikit-image |
 | `--verbose, -v` | Show detailed output |
 
@@ -70,9 +71,12 @@ myapp/
 ├── Containerfile
 └── .daemonless/
     ├── config.yml
-    └── baselines/
-        └── baseline.png
+    ├── baseline.png          # default baseline (for :latest)
+    ├── baseline-pkg.png      # baseline for :pkg tag
+    └── baseline-pkg-latest.png  # baseline for :pkg-latest tag
 ```
+
+When using `--tag pkg`, cit looks for `baseline-pkg.png` first, then falls back to `baseline.png`.
 
 **config.yml:**
 ```yaml
