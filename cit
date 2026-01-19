@@ -23,11 +23,19 @@ setup_deps() {
     echo "Installing cit dependencies..."
     if [ "$(uname)" = "FreeBSD" ]; then
         if [ "$(id -u)" -ne 0 ]; then
-            # Upgrade packages first to fix ABI mismatches
+            # Use quarterly repo to avoid ABI mismatches in latest
+            doas mkdir -p /usr/local/etc/pkg/repos
+            echo 'FreeBSD: { enabled: no }' | doas tee /usr/local/etc/pkg/repos/FreeBSD.conf >/dev/null
+            echo 'FreeBSD-quarterly: { url: "https://pkg.FreeBSD.org/${ABI}/quarterly", enabled: yes }' | doas tee /usr/local/etc/pkg/repos/quarterly.conf >/dev/null
+            doas pkg update -f
             doas pkg upgrade -y
             doas pkg install -y $CIT_DEPS
         else
-            # Upgrade packages first to fix ABI mismatches
+            # Use quarterly repo to avoid ABI mismatches in latest
+            mkdir -p /usr/local/etc/pkg/repos
+            echo 'FreeBSD: { enabled: no }' > /usr/local/etc/pkg/repos/FreeBSD.conf
+            echo 'FreeBSD-quarterly: { url: "https://pkg.FreeBSD.org/${ABI}/quarterly", enabled: yes }' > /usr/local/etc/pkg/repos/quarterly.conf
+            pkg update -f
             pkg upgrade -y
             pkg install -y $CIT_DEPS
         fi
