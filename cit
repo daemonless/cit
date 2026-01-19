@@ -23,8 +23,12 @@ setup_deps() {
     echo "Installing cit dependencies..."
     if [ "$(uname)" = "FreeBSD" ]; then
         if [ "$(id -u)" -ne 0 ]; then
+            # Force reinstall numpy/scipy to fix ABI mismatches
+            doas pkg install -fy py311-numpy py311-scipy
             doas pkg install -y $CIT_DEPS
         else
+            # Force reinstall numpy/scipy to fix ABI mismatches
+            pkg install -fy py311-numpy py311-scipy
             pkg install -y $CIT_DEPS
         fi
     else
