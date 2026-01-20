@@ -610,6 +610,11 @@ VERIFY_OUTPUT=$(python3 "$VERIFY_SCRIPT" "$SCREENSHOT_FILE" 2>&1)
 if ! echo "$VERIFY_OUTPUT" | grep -q "^PASS"; then
     echo "FAIL: Screenshot verification failed"
     echo "$VERIFY_OUTPUT"
+    # Save the screenshot for review even on failure
+    if [ -n "$SAVE_SCREENSHOT" ]; then
+        cp "$SCREENSHOT_FILE" "$SAVE_SCREENSHOT"
+        log "Saved failed screenshot to $SAVE_SCREENSHOT"
+    fi
     exit 1
 fi
 
