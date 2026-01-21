@@ -66,6 +66,7 @@ COMPOSE_FILE=""
 READY_PATTERN_OVERRIDE=""
 SCREENSHOT_URL=""
 HTTPS=false
+SCREENSHOT_WAIT=0
 
 # Result tracking
 RESULT_SHELL="skip"
@@ -161,6 +162,10 @@ while [ $# -gt 0 ]; do
             TAG="$2"
             shift 2
             ;;
+        --screenshot-wait)
+            SCREENSHOT_WAIT="$2"
+            shift 2
+            ;;
         --setup)
             setup_deps
             ;;
@@ -183,6 +188,7 @@ while [ $# -gt 0 ]; do
             echo "  --keep              Don't cleanup after test"
             echo "  --json FILE         Write result JSON to file"
             echo "  --screenshot FILE   Save screenshot to file (screenshot mode only)"
+            echo "  --screenshot-wait S Minimum seconds to wait before screenshot (default: 0)"
             echo "  --tag TAG           Image tag (for per-tag baselines: baseline-TAG.png)"
             echo "  --verbose, -v       Show more output"
             echo "  --setup             Install dependencies (FreeBSD only)"
@@ -368,6 +374,10 @@ if [ -n "$REPO" ]; then
         # HTTPS override (e.g., https: true)
         _HTTPS=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*https:' | awk '{print $2}')
         [ "$_HTTPS" = "true" ] && HTTPS=true
+
+        # Screenshot wait override (e.g., screenshot_wait: 5)
+        _SCREENSHOT_WAIT=$(sed -n '/^cit:/,/^[^ ]/p' "$CIT_CONFIG" 2>/dev/null | grep '^[[:space:]]*screenshot_wait:' | awk '{print $2}')
+        [ -n "$_SCREENSHOT_WAIT" ] && SCREENSHOT_WAIT="$_SCREENSHOT_WAIT"
 
         # Annotation overrides
         if [ -z "$ANNOTATIONS" ]; then
@@ -591,7 +601,7 @@ if [ ! -f "$SCREENSHOT_SCRIPT" ]; then
     exit 1
 fi
 
-if ! python3 "$SCREENSHOT_SCRIPT" "$WEB_URL" "$SCREENSHOT_FILE"; then
+if ! python3 "$SCREENSHOT_SCRIPT" "$WEB_URL" "$SCREENSHOT_FILE" 30 "$SCREENSHOT_WAIT"; then
     echo "FAIL: Screenshot capture failed"
     exit 1
 fi

@@ -58,6 +58,7 @@ git clone https://github.com/daemonless/cit.git
 | `--annotation K=V` | Add container annotation (repeatable) |
 | `--keep` | Don't cleanup container after test |
 | `--screenshot FILE` | Capture screenshot |
+| `--screenshot-wait S` | Minimum seconds to wait before screenshot (default: 0) |
 | `--tag TAG` | Image tag for per-tag baselines (e.g., `pkg`, `latest`) |
 | `--verify` | Verify screenshot with scikit-image |
 | `--verbose, -v` | Show detailed output |
@@ -84,6 +85,7 @@ cit:
   port: 7878
   health: /ping
   wait: 30
+  screenshot_wait: 5  # min seconds to wait before screenshot (for slow UIs)
   annotations:
     - org.freebsd.jail.allow.mlock=true
 ```
