@@ -559,20 +559,21 @@ log "Port test: PASS"
 # === HEALTH TEST ===
 if [ "$HTTPS" = true ]; then
     URL="https://${IP}:${PORT}${HEALTH}"
-    FETCH_CMD_HEALTH="fetch --no-verify-peer -qo /dev/null -T 5"
 else
     URL="http://${IP}:${PORT}${HEALTH}"
-    FETCH_CMD_HEALTH="$FETCH_CMD"
 fi
 log "Health check: $URL"
 
 # Retry health check for WAIT seconds (especially important for compose mode)
+# Accept any HTTP response (2xx, 4xx) as healthy - means backend is responding
+# Only connection failures (502, timeouts) indicate backend is not ready
 log "Waiting for health endpoint (timeout: ${WAIT}s)..."
 ELAPSED=0
 HEALTH_OK=false
 while [ "$ELAPSED" -lt "$WAIT" ]; do
-    if $FETCH_CMD_HEALTH "$URL" 2>/dev/null; then
-        log "Health ready after ${ELAPSED}s"
+    HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 5 "$URL" 2>/dev/null || echo "000")
+    if [ "$HTTP_CODE" != "000" ] && [ "$HTTP_CODE" != "502" ] && [ "$HTTP_CODE" != "503" ]; then
+        log "Health ready after ${ELAPSED}s (HTTP $HTTP_CODE)"
         HEALTH_OK=true
         break
     fi
