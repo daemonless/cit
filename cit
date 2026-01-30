@@ -566,10 +566,33 @@ else
 fi
 log "Health check: $URL"
 
-if ! $FETCH_CMD_HEALTH "$URL" 2>/dev/null; then
+# Retry health check for WAIT seconds (especially important for compose mode)
+log "Waiting for health endpoint (timeout: ${WAIT}s)..."
+ELAPSED=0
+HEALTH_OK=false
+while [ "$ELAPSED" -lt "$WAIT" ]; do
+    if $FETCH_CMD_HEALTH "$URL" 2>/dev/null; then
+        log "Health ready after ${ELAPSED}s"
+        HEALTH_OK=true
+        break
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+done
+
+if [ "$HEALTH_OK" = false ]; then
     echo "FAIL: Health check failed"
     echo "  URL: $URL"
-    $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -10 | sed 's/^/  /'
+    if [ "$COMPOSE" = true ]; then
+        echo "  (compose mode - showing logs for all containers)"
+        if [ "$(uname)" = "FreeBSD" ] && [ "$(id -u)" -ne 0 ]; then
+            doas podman-compose -f "$COMPOSE_FILE" logs --tail 20 2>&1 | sed 's/^/  /'
+        else
+            podman-compose -f "$COMPOSE_FILE" logs --tail 20 2>&1 | sed 's/^/  /'
+        fi
+    else
+        $RUNTIME logs "$CONTAINER_NAME" 2>&1 | tail -10 | sed 's/^/  /'
+    fi
     exit 1
 fi
 
